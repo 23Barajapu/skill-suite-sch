@@ -933,8 +933,7 @@ function Run-Sync {
                 if ($cloneRes.ExitCode -eq 0 -and (Test-Path $tempRepo)) {
                     $localRepo = $tempRepo
                     $isTempClone = $true
-                    $upBranch = if ($cfg.ContainsKey('upstream_branch') -and $cfg.upstream_branch) { $cfg.upstream_branch } else { "main" }
-                    & git -C $localRepo remote add upstream $cfg.upstream_repo 2>&1 | Out-Null
+                    [void](Invoke-GitWithSpinner -Message "Menambahkan remote upstream ($skillKey)..." -WorkDir $localRepo -GitArgs @("remote", "add", "upstream", $cfg.upstream_repo))
                 } else {
                     Write-Warn "Backup repo ($($cfg.backup_repo)) tidak dapat diakses dari CI (pastikan secret ORG_GITHUB_TOKEN sudah diatur bila repo bersifat Private). Mengecek upstream saja..."
                 }
@@ -942,7 +941,13 @@ function Run-Sync {
 
             if (Test-Path $localRepo) {
                 Write-Info "Menarik update upstream..."
-                $remotes = @(git -C $localRepo remote)
+                $prevEap = $ErrorActionPreference
+                $ErrorActionPreference = "Continue"
+                try {
+                    $remotes = @(git -C $localRepo remote 2>$null)
+                } finally {
+                    $ErrorActionPreference = $prevEap
+                }
                 $upBranch = if ($cfg.ContainsKey('upstream_branch') -and $cfg.upstream_branch) { $cfg.upstream_branch } else { "main" }
                 $pullArgs = if ($remotes -contains "upstream") { @("pull", "upstream", $upBranch, "--no-edit", "--strategy-option=theirs", "--quiet") } else { @("pull", "--no-edit", "--strategy-option=theirs", "--quiet") }
                 $pullRes = Invoke-GitWithSpinner -Message "git pull upstream..." -WorkDir $localRepo -GitArgs $pullArgs
@@ -950,12 +955,18 @@ function Run-Sync {
                     Write-Ok "Local repository up-to-date."
                 } else {
                     # Selesaikan otomatis jika ada unmerged paths konflik menggunakan versi pemilik asli
-                    $unmerged = @(git -C $localRepo status --porcelain 2>$null | Where-Object { $_ -match '^(U.|.U|DD|AA)' })
+                    $prevEap = $ErrorActionPreference
+                    $ErrorActionPreference = "Continue"
+                    try {
+                        $unmerged = @(git -C $localRepo status --porcelain 2>$null | Where-Object { $_ -match '^(U.|.U|DD|AA)' })
+                    } finally {
+                        $ErrorActionPreference = $prevEap
+                    }
                     if ($unmerged.Count -gt 0) {
                         Write-Info "Menyelesaikan konflik secara otomatis menggunakan versi upstream pemilik asli..."
-                        & git -C $localRepo checkout --theirs . 2>&1 | Out-Null
-                        & git -C $localRepo add . 2>&1 | Out-Null
-                        & git -C $localRepo commit -m "Merge upstream updates (use original owner version)" --quiet 2>&1 | Out-Null
+                        [void](Invoke-GitWithSpinner -Message "Checkout theirs..." -WorkDir $localRepo -GitArgs @("checkout", "--theirs", "."))
+                        [void](Invoke-GitWithSpinner -Message "Stage konflik..." -WorkDir $localRepo -GitArgs @("add", "."))
+                        [void](Invoke-GitWithSpinner -Message "Commit merge upstream..." -WorkDir $localRepo -GitArgs @("commit", "-m", "Merge upstream updates (use original owner version)", "--quiet"))
                         Write-Ok "Konflik berhasil diselesaikan menggunakan versi pemilik asli."
                     } else {
                         Write-Info "Status pull: $($pullRes.Output)"
@@ -964,7 +975,13 @@ function Run-Sync {
 
                 if (-not $SkipPush -and -not $DryRun) {
                     if (-not [string]::IsNullOrWhiteSpace($cfg.backup_repo) -and ($remotes -contains "origin")) {
-                        $originRaw = git -C $localRepo remote get-url origin 2>$null
+                        $prevEap = $ErrorActionPreference
+                        $ErrorActionPreference = "Continue"
+                        try {
+                            $originRaw = git -C $localRepo remote get-url origin 2>$null
+                        } finally {
+                            $ErrorActionPreference = $prevEap
+                        }
                         $originUrl = if ($originRaw) { ($originRaw | Out-String).Trim() } else { "" }
                         if ($originUrl -and $originUrl -ne $cfg.upstream_repo) {
                             $safeOriginLabel = $originUrl -replace 'x-access-token:[^@]+@', ''

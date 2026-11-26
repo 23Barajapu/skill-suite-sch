@@ -1,4 +1,4 @@
-﻿function Invoke-AntigravitySkillManager {
+function Invoke-AntigravitySkillManager {
     [CmdletBinding(DefaultParameterSetName = "Default")]
     param(
         [Parameter(Position = 0)]

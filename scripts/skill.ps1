@@ -1,4 +1,4 @@
-function Invoke-AntigravitySkillManager {
+﻿function Invoke-AntigravitySkillManager {
     [CmdletBinding(DefaultParameterSetName = "Default")]
     param(
         [Parameter(Position = 0)]
@@ -27,7 +27,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $env:GIT_TERMINAL_PROMPT = "0"
 
-if ($Yes -or $Y) { $NonInteractive = $true }
+if ($Yes -or $Y -or $env:GITHUB_ACTIONS -eq "true" -or $env:CI -eq "true") { $NonInteractive = $true }
 
 # Normalisasi Action berdasarkan switch
 if ($Sync)                  { $Action = "sync" }
@@ -48,7 +48,9 @@ $CURRENT_SCRIPT_PATH = if ($cmdPath) { $cmdPath } else { Join-Path $env:TEMP "sk
 $WORKSPACE_DIR = if ($cmdPath -and (Test-Path $cmdPath)) {
     Split-Path -Parent (Split-Path -Parent (Resolve-Path $cmdPath).Path)
 } else {
-    if (Test-Path "c:\laragon\www\agent") { "c:\laragon\www\agent" } else { (Get-Location).Path }
+    if (Test-Path "c:\laragon\www\skill-suite") { "c:\laragon\www\skill-suite" }
+    elseif (Test-Path "c:\laragon\www\agent") { "c:\laragon\www\agent" }
+    else { (Get-Location).Path }
 }
 
 $LOCAL_SKILLS_DIR = if ($TargetDir) {
@@ -318,17 +320,10 @@ function Copy-SkillToAgent {
             $destSkillMd = Join-Path $dest "SKILL.md"
             if (Test-Path $destSkillMd) {
                 $content = Get-Content -Path $destSkillMd -Raw
+                if ($null -eq $content) { $content = "" }
                 if ($content -notmatch "(?m)^name:\s*") {
-                    if ($content -match "^(?:
-?
-)?---
-?
-") {
-                        $content = $content -replace "^(?:
-?
-)?---
-?
-", "---`nname: $SkillName`n"
+                    if ($content -match "^(?:\r?\n)?---\r?\n") {
+                        $content = $content -replace "^(?:\r?\n)?---\r?\n", "---`nname: $SkillName`n"
                     } else {
                         $content = "---`nname: $SkillName`n---`n" + $content
                     }
@@ -429,20 +424,27 @@ function Invoke-GitWithSpinner {
     $outTask = $proc.StandardOutput.ReadToEndAsync()
     $errTask = $proc.StandardError.ReadToEndAsync()
 
-    $frames = @('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
-    if ([Console]::OutputEncoding.CodePage -ne 65001) {
+    $isCiEnv = ($env:GITHUB_ACTIONS -eq "true" -or $env:CI -eq "true")
+    if ($isCiEnv) {
+        Write-Host "       [..] $Message" -ForegroundColor Gray
+    } else {
         $frames = @('|', '/', '-', '\')
-    }
+        try {
+            if ([Console]::OutputEncoding.CodePage -eq 65001) {
+                $frames = @('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
+            }
+        } catch { }
 
-    $i = 0
-    while (-not $proc.HasExited) {
-        $f = $frames[$i % $frames.Length]
-        $el = "{0:d2}:{1:d2}" -f [int]$sw.Elapsed.TotalMinutes, $sw.Elapsed.Seconds
-        $line = "       [$f] $Message ($el)..."
-        if ($line.Length -gt 78) { $line = $line.Substring(0, 78) }
-        Write-Host -NoNewline "`r$line"
-        Start-Sleep -Milliseconds 80
-        $i++
+        $i = 0
+        while (-not $proc.HasExited) {
+            $f = $frames[$i % $frames.Length]
+            $el = "{0:d2}:{1:d2}" -f [int]$sw.Elapsed.TotalMinutes, $sw.Elapsed.Seconds
+            $line = "       [$f] $Message ($el)..."
+            if ($line.Length -gt 78) { $line = $line.Substring(0, 78) }
+            Write-Host -NoNewline "`r$line"
+            Start-Sleep -Milliseconds 80
+            $i++
+        }
     }
 
     $proc.WaitForExit()
@@ -451,7 +453,9 @@ function Invoke-GitWithSpinner {
     $stderr = $errTask.Result
     $sw.Stop()
 
-    Write-Host -NoNewline ("`r" + (" " * 79) + "`r")
+    if (-not $isCiEnv) {
+        Write-Host -NoNewline ("`r" + (" " * 79) + "`r")
+    }
 
     $combined = ($stdout + "`n" + $stderr).Trim()
     return [PSCustomObject]@{
@@ -532,6 +536,7 @@ function Install-AntigravityPlugins {
         $candAnti = Join-Path $spSrc ".antigravity-plugin"
         if (Test-Path (Join-Path $candPlugin "plugin.json")) {
             if (-not (Test-Path $spDest) -or $ForceOverwrite) {
+                if (Test-Path $spDest) { Remove-Item -Path $spDest -Recurse -Force }
                 Copy-Item -Path $candPlugin -Destination $spDest -Recurse -Force
             }
             $spInstalled = $true
@@ -812,7 +817,8 @@ function Run-Install {
             if (Test-Path $LOCAL_PLUGINS_DIR) {
                 $pluginCount = @(Get-ChildItem -Path $LOCAL_PLUGINS_DIR -Directory).Count
             }
-            $pNames = if ($pluginsInstalled.Count -gt 0) { $pluginsInstalled -join ', ' } else { "RTK, Superpowers" }
+            $installedPluginsArr = @($pluginsInstalled | Where-Object { $_ })
+            $pNames = if ($installedPluginsArr.Count -gt 0) { $installedPluginsArr -join ', ' } else { "RTK, Superpowers" }
             Write-Host "       - Plugin Antigravity     : $pluginCount plugin aktif ($pNames) ($LOCAL_PLUGINS_DIR)" -ForegroundColor Cyan
         }
     }
@@ -884,74 +890,112 @@ function Run-Sync {
     $targetSkills = if ($SkillFilter -eq "all") {
         @($SKILL_MAP.Keys)
     } else {
-        @($SkillFilter -split "," | ForEach-Object { $_.Trim() })
+        @($SkillFilter -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     }
 
-    foreach ($skillKey in $targetSkills) {
-        if (-not $SKILL_MAP.ContainsKey($skillKey)) {
-            Write-Warn "Skill '$skillKey' tidak terdaftar di `$SKILL_MAP. Dilewati."
-            continue
-        }
+    $isCi = ($env:GITHUB_ACTIONS -eq "true" -or $env:CI -eq "true")
+    $ciTempRoot = ""
+    if ($isCi) {
+        $ciTempRoot = Join-Path $env:TEMP ("sync-ci-" + (Get-Date -Format "yyyyMMddHHmmss"))
+        New-Item -ItemType Directory -Path $ciTempRoot -Force | Out-Null
+    }
 
-        $cfg = $SKILL_MAP[$skillKey]
-        Write-Step "Sinkronisasi: $skillKey"
+    try {
+        foreach ($skillKey in $targetSkills) {
+            if (-not $SKILL_MAP.ContainsKey($skillKey)) {
+                Write-Warn "Skill '$skillKey' tidak terdaftar di `$SKILL_MAP. Dilewati."
+                continue
+            }
 
-        # Kloning/Update Upstream
-        $localRepo = Join-Path $WORKSPACE_DIR $skillKey
-        if (-not (Test-Path $localRepo)) {
-            $localRepo = Join-Path $WORKSPACE_DIR "$skillKey-bara"
-        }
-        if (-not (Test-Path $localRepo) -and $skillKey -eq "antislop") {
-            $localRepo = Join-Path $WORKSPACE_DIR "anti-slop"
-        }
+            $cfg = $SKILL_MAP[$skillKey]
+            Write-Step "Sinkronisasi: $skillKey"
 
-        if (Test-Path $localRepo) {
-            Write-Info "Menarik update upstream..."
-            $remotes = git -C $localRepo remote
-            $upBranch = if ($cfg.ContainsKey('upstream_branch') -and $cfg.upstream_branch) { $cfg.upstream_branch } else { "main" }
-            $pullArgs = if ($remotes -contains "upstream") { @("pull", "upstream", $upBranch, "--no-edit", "--strategy-option=theirs", "--quiet") } else { @("pull", "--no-edit", "--strategy-option=theirs", "--quiet") }
-            $pullRes = Invoke-GitWithSpinner -Message "git pull upstream..." -WorkDir $localRepo -GitArgs $pullArgs
-            if ($pullRes.ExitCode -eq 0) {
-                Write-Ok "Local repository up-to-date."
-            } else {
-                # Selesaikan otomatis jika ada unmerged paths konflik menggunakan versi pemilik asli
-                $unmerged = git -C $localRepo status --porcelain 2>$null | Where-Object { $_ -match '^(U.|.U|DD|AA)' }
-                if ($unmerged) {
-                    Write-Info "Menyelesaikan konflik secara otomatis menggunakan versi upstream pemilik asli..."
-                    & git -C $localRepo checkout --theirs . 2>&1 | Out-Null
-                    & git -C $localRepo add . 2>&1 | Out-Null
-                    & git -C $localRepo commit -m "Merge upstream updates (use original owner version)" --quiet 2>&1 | Out-Null
-                    Write-Ok "Konflik berhasil diselesaikan menggunakan versi pemilik asli."
+            # Kloning/Update Upstream
+            $localRepo = Join-Path $WORKSPACE_DIR $skillKey
+            if (-not (Test-Path $localRepo)) {
+                $localRepo = Join-Path $WORKSPACE_DIR "$skillKey-bara"
+            }
+            if (-not (Test-Path $localRepo) -and $skillKey -eq "antislop") {
+                $localRepo = Join-Path $WORKSPACE_DIR "anti-slop"
+            }
+            if (-not (Test-Path $localRepo) -and $skillKey -eq "ponytail") {
+                $localRepo = Join-Path $WORKSPACE_DIR "ponytail-bara"
+            }
+
+            $isTempClone = $false
+            if (-not (Test-Path $localRepo) -and $isCi -and -not [string]::IsNullOrWhiteSpace($cfg.backup_repo)) {
+                $tempRepo = Join-Path $ciTempRoot $skillKey
+                $authBackupUrl = $cfg.backup_repo
+                if ($env:GITHUB_TOKEN -and $authBackupUrl -match '^https://github\.com/') {
+                    $authBackupUrl = $authBackupUrl -replace '^https://github\.com/', "https://x-access-token:$($env:GITHUB_TOKEN)@github.com/"
+                }
+                $cloneRes = Invoke-GitWithSpinner -Message "Mengkloning backup repo ($skillKey) di CI..." -GitArgs @("-c", "credential.helper=", "clone", "--branch", $cfg.backup_branch, "--single-branch", "--quiet", $authBackupUrl, $tempRepo)
+                if ($cloneRes.ExitCode -eq 0 -and (Test-Path $tempRepo)) {
+                    $localRepo = $tempRepo
+                    $isTempClone = $true
+                    $upBranch = if ($cfg.ContainsKey('upstream_branch') -and $cfg.upstream_branch) { $cfg.upstream_branch } else { "main" }
+                    & git -C $localRepo remote add upstream $cfg.upstream_repo 2>&1 | Out-Null
                 } else {
-                    Write-Info "Status pull: $($pullRes.Output)"
+                    Write-Warn "Backup repo ($($cfg.backup_repo)) tidak dapat diakses dari CI (pastikan secret ORG_GITHUB_TOKEN sudah diatur bila repo bersifat Private). Mengecek upstream saja..."
                 }
             }
 
-            if (-not $SkipPush -and -not $DryRun) {
-                if (-not [string]::IsNullOrWhiteSpace($cfg.backup_repo) -and ($remotes -contains "origin")) {
-                    $originUrl = (git -C $localRepo remote get-url origin 2>$null).Trim()
-                    if ($originUrl -and $originUrl -ne $cfg.upstream_repo) {
-                        Write-Info "Push ke backup repo ($originUrl)..."
-                        $pushRes = Invoke-GitWithSpinner -Message "git push backup..." -WorkDir $localRepo -GitArgs @("push", "origin", $cfg.backup_branch, "--quiet")
-                        if ($pushRes.ExitCode -eq 0) {
-                            Write-Ok "Backup repo tersinkronisasi."
+            if (Test-Path $localRepo) {
+                Write-Info "Menarik update upstream..."
+                $remotes = @(git -C $localRepo remote)
+                $upBranch = if ($cfg.ContainsKey('upstream_branch') -and $cfg.upstream_branch) { $cfg.upstream_branch } else { "main" }
+                $pullArgs = if ($remotes -contains "upstream") { @("pull", "upstream", $upBranch, "--no-edit", "--strategy-option=theirs", "--quiet") } else { @("pull", "--no-edit", "--strategy-option=theirs", "--quiet") }
+                $pullRes = Invoke-GitWithSpinner -Message "git pull upstream..." -WorkDir $localRepo -GitArgs $pullArgs
+                if ($pullRes.ExitCode -eq 0) {
+                    Write-Ok "Local repository up-to-date."
+                } else {
+                    # Selesaikan otomatis jika ada unmerged paths konflik menggunakan versi pemilik asli
+                    $unmerged = @(git -C $localRepo status --porcelain 2>$null | Where-Object { $_ -match '^(U.|.U|DD|AA)' })
+                    if ($unmerged.Count -gt 0) {
+                        Write-Info "Menyelesaikan konflik secara otomatis menggunakan versi upstream pemilik asli..."
+                        & git -C $localRepo checkout --theirs . 2>&1 | Out-Null
+                        & git -C $localRepo add . 2>&1 | Out-Null
+                        & git -C $localRepo commit -m "Merge upstream updates (use original owner version)" --quiet 2>&1 | Out-Null
+                        Write-Ok "Konflik berhasil diselesaikan menggunakan versi pemilik asli."
+                    } else {
+                        Write-Info "Status pull: $($pullRes.Output)"
+                    }
+                }
+
+                if (-not $SkipPush -and -not $DryRun) {
+                    if (-not [string]::IsNullOrWhiteSpace($cfg.backup_repo) -and ($remotes -contains "origin")) {
+                        $originRaw = git -C $localRepo remote get-url origin 2>$null
+                        $originUrl = if ($originRaw) { ($originRaw | Out-String).Trim() } else { "" }
+                        if ($originUrl -and $originUrl -ne $cfg.upstream_repo) {
+                            $safeOriginLabel = $originUrl -replace 'x-access-token:[^@]+@', ''
+                            Write-Info "Push ke backup repo ($safeOriginLabel)..."
+                            $pushRes = Invoke-GitWithSpinner -Message "git push backup..." -WorkDir $localRepo -GitArgs @("push", "origin", $cfg.backup_branch, "--quiet")
+                            if ($pushRes.ExitCode -eq 0) {
+                                Write-Ok "Backup repo tersinkronisasi."
+                            } else {
+                                Write-Warn "Status push: $($pushRes.Output)"
+                            }
                         } else {
-                            Write-Info "Status push: $($pushRes.Output)"
+                            Write-Info "Origin belum diset ke backup repo (masih upstream publik). Melewati push."
                         }
                     } else {
-                        Write-Info "Origin belum diset ke backup repo (masih upstream publik). Melewati push."
+                        Write-Info "Tidak ada backup repo yang dikonfigurasi untuk '$skillKey'. Melewati push."
                     }
-                } else {
-                    Write-Info "Tidak ada backup repo yang dikonfigurasi untuk '$skillKey'. Melewati push."
                 }
+            } else {
+                Write-Info "Repositori lokal untuk '$skillKey' belum di-clone. Melewati sync lokal."
             }
-        } else {
-            Write-Info "Repositori lokal untuk '$skillKey' belum di-clone. Melewati sync lokal."
+        }
+    } finally {
+        if ($ciTempRoot -and (Test-Path $ciTempRoot)) {
+            Remove-Item -Path $ciTempRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 
-    # Pasang kembali ke global agar update langsung aktif
-    Run-Install
+    # Pasang kembali ke global agar update langsung aktif (kecuali di mode DryRun)
+    if (-not $DryRun) {
+        Run-Install
+    }
 }
 
     # --- Router Aksi Utama ---
@@ -963,4 +1007,61 @@ function Run-Sync {
     }
 }
 
-Invoke-AntigravitySkillManager @args
+$switchParamNames = @{
+    "noninteractive" = "NonInteractive"
+    "yes"            = "Yes"
+    "y"              = "Y"
+    "install"        = "Install"
+    "sync"           = "Sync"
+    "check"          = "Check"
+    "checkonly"      = "CheckOnly"
+    "force"          = "Force"
+    "clonelocal"     = "CloneLocal"
+    "dryrun"         = "DryRun"
+    "skippush"       = "SkipPush"
+    "skiporgcheck"   = "SkipOrgCheck"
+}
+$valueParamNames = @{
+    "action"      = "Action"
+    "skillfilter" = "SkillFilter"
+    "target"      = "Target"
+    "package"     = "Package"
+    "targetdir"   = "TargetDir"
+}
+
+$namedArgs = @{}
+$posArgs   = @()
+for ($idx = 0; $idx -lt $args.Count; $idx++) {
+    $tok = $args[$idx]
+    if ($tok -is [string] -and $tok.StartsWith("-")) {
+        $rawKey = $tok.Substring(1)
+        $inlineVal = $null
+        if ($rawKey -match '^([^:]+):(.*)$') {
+            $rawKey = $Matches[1]
+            $inlineVal = $Matches[2]
+        }
+        $keyLower = $rawKey.ToLower()
+        if ($switchParamNames.ContainsKey($keyLower)) {
+            $pName = $switchParamNames[$keyLower]
+            if ($null -ne $inlineVal) {
+                $namedArgs[$pName] = ($inlineVal -notmatch '^(0|false|\$false)$')
+            } else {
+                $namedArgs[$pName] = $true
+            }
+        } elseif ($valueParamNames.ContainsKey($keyLower)) {
+            $pName = $valueParamNames[$keyLower]
+            if ($null -ne $inlineVal) {
+                $namedArgs[$pName] = $inlineVal
+            } elseif (($idx + 1) -lt $args.Count) {
+                $idx++
+                $namedArgs[$pName] = [string]$args[$idx]
+            }
+        } else {
+            $posArgs += $tok
+        }
+    } else {
+        $posArgs += $tok
+    }
+}
+
+Invoke-AntigravitySkillManager @namedArgs @posArgs

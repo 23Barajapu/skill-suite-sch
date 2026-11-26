@@ -53,10 +53,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.ORG_GITHUB_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          $params = @("-SkillFilter", "${{ inputs.skill_filter || 'all' }}")
+          $params = @("-Sync", "-NonInteractive", "-SkillFilter", "${{ inputs.skill_filter || 'all' }}")
           if ("${{ inputs.force }}" -eq "true") { $params += "-Force" }
           if ("${{ inputs.dry_run }}" -eq "true") { $params += "-DryRun" }
           if ("${{ inputs.skip_push }}" -eq "true") { $params += "-SkipPush" }
           
           Write-Host "Menjalankan Gerbang Sinkronisasi Skill Terpusat..." -ForegroundColor Cyan
-          .\scripts\skill.ps1 -Sync @params
+          .\scripts\skill.ps1 @params
